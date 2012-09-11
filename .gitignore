@@ -1,0 +1,8 @@
+*.md~
+*.asm~
+*.inc~
+*.c~
+*.bin
+.gitignore~
+os.img
+Makefile~

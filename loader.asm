@@ -2,16 +2,30 @@ org  0100h
 
 BaseOfStack		equ	0100h
 
-BaseOfKernelFile	equ	 08000h	; KERNEL.BIN 被加载到的位置 ----  段地址
-OffsetOfKernelFile	equ	     0h	; KERNEL.BIN 被加载到的位置 ---- 偏移地址
-
 
 	jmp	LABEL_START		; Start
 
 ; 下面是 FAT12 磁盘的头, 之所以包含它是因为下面用到了磁盘的一些信息
 %include	"fat12hdr.inc"
+%include	"load.inc"	; header of loader information
+%include	"pm.inc"	; header of protected mode
 
+[SECTION .gdt]
+; GDT info				base		limit		attribute
+LABEL_GDT:		Descriptor	0,		0,		0
+LABEL_DESC_CR:		Descriptor	0,		0fffffh,	DA_CR|DA_32|DA_LIMIT_4K
+LABEL_DESC_RW		Descriptor	0,		0fffffh,	DA_DRW|DA_32|DA_LIMIT_4K
+LABEL_DESC_VIDEO:	Descriptor	0B8000h,	0ffffh,		DA_DRW|DA_DPL3
 
+GdtLen		equ		$ - LABEL_GDT
+GdtPtr		dw		GdtLen - 1 			; limit
+		dd		phyBaseOfLoader + LABEL_GDT	; base
+
+; GDT selector
+SelectorCR		equ		LABEL_DESC_CR - LABEL_GDT
+SelectorRW		equ		LABEL_DESC_RW - LABEL_GDT
+SelectorVideo		equ		LABEL_DESC_VIDEO - LABEL_GDT + SA_RPL3
+	
 LABEL_START:			; <--- 从这里开始 *************
 	mov	ax, cs
 	mov	ds, ax
@@ -20,7 +34,7 @@ LABEL_START:			; <--- 从这里开始 *************
 	mov	sp, BaseOfStack
 
 	mov	dh, 0			; "Loading  "
-	call	DispStr			; 显示字符串
+	call	DispStrRealMode			; 显示字符串
 
 	; 下面在 A 盘的根目录寻找 KERNEL.BIN
 	mov	word [wSectorNo], SectorNoOfRootDirectory	
@@ -120,16 +134,34 @@ LABEL_GOON_LOADING_FILE:
 	add	ax, DeltaSectorNo
 	add	bx, [BPB_BytsPerSec]
 	jmp	LABEL_GOON_LOADING_FILE
+	
 LABEL_FILE_LOADED:
-
 	call	KillMotor		; 关闭软驱马达
 
 	mov	dh, 1			; "Ready."
-	call	DispStr			; 显示字符串
+	; call	DispStr			; 显示字符串
+	call	DispStrRealMode		; 显示字符串
+
+	; prepare to jump to protected mode
+
+	lgdt	[GdtPtr]	; load GDTR
+
+	cli			; close interrupt
+
+	; open address line 20A
+	in	al, 92h
+	or	al, 00000010b
+	out	92h, al
+
+	mov	eax, cr0
+	or	eax, 1
+	mov	cr0, eax
+
+	; jump to protected mode
+	jmp	dword	SelectorCR : (phyBaseOfLoader + LABEL_PM_START)
 
 	jmp	$
-
-
+	
 ;============================================================================
 ;变量
 ;----------------------------------------------------------------------------
@@ -150,6 +182,29 @@ Message2		db	"No KERNEL"
 ;============================================================================
 
 ;----------------------------------------------------------------------------
+; 函数名: DispStrRealMode
+;----------------------------------------------------------------------------
+; 运行环境:
+;	实模式（保护模式下显示字符串由函数 DispStr 完成）
+; 作用:
+;	显示一个字符串, 函数开始时 dh 中应该是字符串序号(0-based)
+DispStrRealMode:
+	mov	ax, MessageLength
+	mul	dh
+	add	ax, LoadMessage
+	mov	bp, ax			; ┓
+	mov	ax, ds			; ┣ ES:BP = 串地址
+	mov	es, ax			; ┛
+	mov	cx, MessageLength	; CX = 串长度
+	mov	ax, 01301h		; AH = 13,  AL = 01h
+	mov	bx, 0007h		; 页号为0(BH = 0) 黑底白字(BL = 07h)
+	mov	dl, 0
+	add	dh, 3			; 从第 3 行往下显示
+	int	10h			; int 10h
+	ret
+;----------------------------------------------------------------------------
+	
+;----------------------------------------------------------------------------
 ; 函数名: DispStr
 ;----------------------------------------------------------------------------
 ; 作用:
@@ -168,6 +223,8 @@ DispStr:
 	add	dh, 3			; 从第 3 行往下显示
 	int	10h			; int 10h
 	ret
+;----------------------------------------------------------------------------
+	
 ;----------------------------------------------------------------------------
 ; 函数名: ReadSector
 ;----------------------------------------------------------------------------
@@ -210,7 +267,8 @@ ReadSector:
 	pop	bp
 
 	ret
-
+;----------------------------------------------------------------------------
+	
 ;----------------------------------------------------------------------------
 ; 函数名: GetFATEntry
 ;----------------------------------------------------------------------------
@@ -259,7 +317,6 @@ LABEL_GET_FAT_ENRY_OK:
 	ret
 ;----------------------------------------------------------------------------
 
-
 ;----------------------------------------------------------------------------
 ; 函数名: KillMotor
 ;----------------------------------------------------------------------------
@@ -274,3 +331,20 @@ KillMotor:
 	ret
 ;----------------------------------------------------------------------------
 
+; 32-bit codes
+[SECTION .s32]
+ALIGN	32
+[BITS	32]
+LABEL_PM_START:
+	mov	ax, SelectorVideo
+	mov	gs, ax
+	mov	ax, SelectorRW
+	mov	ds, ax
+	mov	es, ax
+	mov	fs, ax
+	mov	ss, ax
+	
+	mov	ah, 02h
+	mov	al, 'P'
+	mov	[gs : ((80 * 6 + 0) * 2)], ax
+	jmp	$
